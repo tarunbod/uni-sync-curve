@@ -25,51 +25,51 @@ pub struct CurvePoint {
     pub fan_speed_percent: u8,
 }
 
-impl Default for CurveConfig {
-    fn default() -> Self {
-        Self {
-            interval_seconds: 5,
-            fan_curves: vec![FanCurve {
-                device_id: "example".to_string(),
-                channel: 0,
-                curve_points: vec![
-                    CurvePoint {
-                        temperature_celsius: 30.0,
-                        fan_speed_percent: 20,
-                    },
-                    CurvePoint {
-                        temperature_celsius: 50.0,
-                        fan_speed_percent: 40,
-                    },
-                    CurvePoint {
-                        temperature_celsius: 70.0,
-                        fan_speed_percent: 70,
-                    },
-                    CurvePoint {
-                        temperature_celsius: 85.0,
-                        fan_speed_percent: 100,
-                    },
-                ],
-            }],
-        }
+fn get_default_config(device_id: String) -> CurveConfig {
+    CurveConfig {
+        interval_seconds: 10,
+        fan_curves: vec![FanCurve {
+            device_id,
+            channel: 0,
+            curve_points: vec![
+                CurvePoint {
+                    temperature_celsius: 30.0,
+                    fan_speed_percent: 20,
+                },
+                CurvePoint {
+                    temperature_celsius: 50.0,
+                    fan_speed_percent: 40,
+                },
+                CurvePoint {
+                    temperature_celsius: 70.0,
+                    fan_speed_percent: 70,
+                },
+                CurvePoint {
+                    temperature_celsius: 85.0,
+                    fan_speed_percent: 100,
+                },
+            ],
+        }],
     }
 }
 
 const CONFIG_PATH: &str = "/etc/uni-sync-curve/uni-sync-curve.json";
 
-pub fn load_config() -> Result<CurveConfig, Box<dyn std::error::Error>> {
+pub fn load_config(default_device_id: String) -> Result<CurveConfig, Box<dyn std::error::Error>> {
     let config_path = Path::new(CONFIG_PATH);
     if !config_path.exists() {
-        let default_config = CurveConfig::default();
+        println!(
+            "Creating default configuration with device ID: {} at: {:?}",
+            default_device_id, config_path
+        );
 
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
+        let default_config = get_default_config(default_device_id);
         let config_json = serde_json::to_string_pretty(&default_config)?;
         std::fs::write(&config_path, config_json)?;
-
-        println!("Created default configuration at: {:?}", config_path);
         return Ok(default_config);
     }
 
@@ -266,8 +266,6 @@ pub fn run(mut existing_configs: Configs) -> Configs {
             let mut channels: Vec<Channel> = default_channels.clone();
             let mut sync_rgb: bool = false;
 
-            println!("Found: {:?}", device_id);
-
             if let Some(config) = existing_configs
                 .configs
                 .iter()
@@ -382,7 +380,6 @@ impl FanController {
             self.device_configs.insert(config.device_id.clone(), config);
         }
 
-        println!("Discovered {} Lian Li devices", self.device_configs.len());
         Ok(())
     }
 
@@ -404,10 +401,6 @@ impl FanController {
                 };
 
                 run(single_config);
-                println!(
-                    "Set device {} channel {} to {}%",
-                    device_id, channel, speed_percent
-                );
             } else {
                 return Err(
                     format!("Channel {} not found for device {}", channel, device_id).into(),
@@ -420,19 +413,6 @@ impl FanController {
         Ok(())
     }
 
-    pub fn apply_fan_curves(
-        &mut self,
-        fan_curves: &[FanCurve],
-        fan_speeds: &HashMap<String, u8>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        for curve in fan_curves {
-            if let Some(&speed) = fan_speeds.get(&curve.device_id) {
-                self.set_fan_speed(&curve.device_id, curve.channel, speed)?;
-            }
-        }
-        Ok(())
-    }
-
     pub fn get_available_devices(&self) -> Vec<String> {
         self.device_configs.keys().cloned().collect()
     }
@@ -440,32 +420,28 @@ impl FanController {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = load_config()?;
+    let mut fan_controller = FanController::new()?;
+    let available_devices = fan_controller.get_available_devices();
+    if available_devices.is_empty() {
+        println!("No Lian Li devices found. Please ensure your devices are connected and you have the necessary permissions.");
+        return Ok(());
+    }
+    println!("Available devices: {:?}", available_devices);
+
+    let config = load_config(available_devices[0].clone())?;
     println!(
         "Loaded configuration with {} fan curves",
         config.fan_curves.len()
     );
     println!("Update interval: {} seconds", config.interval_seconds);
 
-    let mut fan_controller = FanController::new()?;
-
-    let available_devices = fan_controller.get_available_devices();
-    println!("Available devices: {:?}", available_devices);
-
-    if available_devices.is_empty() {
-        println!("No Lian Li devices found. Please ensure your devices are connected and you have the necessary permissions.");
-        return Ok(());
-    }
-
     let mut interval = time::interval(Duration::from_secs(config.interval_seconds));
-
     loop {
         interval.tick().await;
 
         match get_max_cpu_temperature() {
             Some(cpu_temp) => {
-                println!("Current CPU temperature: {:.1}°C", cpu_temp);
-
+                println!("CPU temp: {:.1}°C", cpu_temp);
                 for fan_curve in &config.fan_curves {
                     let speed = calculate_fan_speed(fan_curve, cpu_temp);
                     println!(
