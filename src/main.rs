@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use clap::Parser;
 use hidapi::{self, HidDevice};
 use serde::{Deserialize, Serialize};
@@ -97,12 +97,12 @@ pub fn load_config(config_path: &Path, available_devices: Vec<DeviceId>) -> Resu
 
         let default_config = get_default_config(available_devices);
         let config_json = serde_json::to_string_pretty(&default_config)?;
-        std::fs::write(&config_path, config_json)?;
+        std::fs::write(config_path, config_json)?;
         println!("Created default configuration at: {:?}", config_path);
         return Ok(default_config);
     }
 
-    let config_content = std::fs::read_to_string(&config_path)?;
+    let config_content = std::fs::read_to_string(config_path)?;
     let config: CurveConfig = serde_json::from_str(&config_content)?;
     Ok(config)
 }
@@ -183,7 +183,7 @@ fn interpolate(temp1: f64, speed1: u8, temp2: f64, speed2: u8, current_temp: f64
 
     let interpolated_speed = speed1 as f64 + (temp_offset / temp_range) * speed_range;
 
-    interpolated_speed.round().max(0.0).min(100.0) as u8
+    interpolated_speed.round().clamp(0.0, 100.0) as u8
 }
 
 #[cfg(test)]
@@ -301,7 +301,7 @@ impl FanController {
         // Disable Sync to fan header
         let mut channel_byte = 0x10 << channel;
         if matches!(mode, ChannelMode::PWM) {
-            channel_byte = channel_byte | 0x1 << channel;
+            channel_byte |= 0x1 << channel;
         }
 
         let _ = match &hiddevice.product_id() {
