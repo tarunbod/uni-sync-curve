@@ -1,3 +1,4 @@
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use hidapi::{self, HidDevice};
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,15 @@ pub struct Args {
     pub debug: bool,
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Eq, Hash, Clone, Debug)]
+pub struct DeviceId(u16, u16, String);
+
+impl std::fmt::Display for DeviceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({:04x}, {:04x}, {})", self.0, self.1, self.2)
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CurveConfig {
     pub interval_seconds: u64,
@@ -29,9 +39,16 @@ pub struct CurveConfig {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FanCurve {
-    pub device_id: String,
+    pub device_id: DeviceId,
     pub channel: usize,
+    pub mode: ChannelMode,
     pub curve_points: Vec<CurvePoint>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ChannelMode {
+    Manual,
+    PWM,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -40,7 +57,7 @@ pub struct CurvePoint {
     pub fan_speed_percent: u8,
 }
 
-fn get_default_config(device_ids: Vec<String>) -> CurveConfig {
+fn get_default_config(device_ids: Vec<DeviceId>) -> CurveConfig {
     CurveConfig {
         interval_seconds: 10,
         fan_curves: device_ids
@@ -48,6 +65,7 @@ fn get_default_config(device_ids: Vec<String>) -> CurveConfig {
             .map(|device_id| FanCurve {
                 device_id,
                 channel: 0,
+                mode: ChannelMode::Manual,
                 curve_points: vec![
                     CurvePoint {
                         temperature_celsius: 30.0,
@@ -71,10 +89,7 @@ fn get_default_config(device_ids: Vec<String>) -> CurveConfig {
     }
 }
 
-pub fn load_config(
-    config_path: &Path,
-    available_devices: Vec<String>,
-) -> Result<CurveConfig, Box<dyn std::error::Error>> {
+pub fn load_config(config_path: &Path, available_devices: Vec<DeviceId>) -> Result<CurveConfig> {
     if !config_path.exists() {
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -178,8 +193,9 @@ mod tests {
     #[test]
     fn test_fan_curve_calculation() {
         let curve = FanCurve {
-            device_id: "test".to_string(),
+            device_id: DeviceId(0x0cf2, 0x7750, "TEST123".to_string()),
             channel: 0,
+            mode: ChannelMode::Manual,
             curve_points: vec![
                 CurvePoint {
                     temperature_celsius: 30.0,
@@ -214,199 +230,133 @@ mod tests {
 const VENDOR_IDS: [u16; 1] = [0x0cf2];
 const PRODUCT_IDS: [u16; 7] = [0x7750, 0xa100, 0xa101, 0xa102, 0xa103, 0xa104, 0xa105];
 
-type DeviceId = (u16, u16, String, String);
-
-#[derive(PartialEq, Eq)]
-enum ChannelMode {
-    Manual,
-    PWM,
+pub struct FanController {
+    hidapi: hidapi::HidApi,
+    device_configs: HashMap<DeviceId, hidapi::DeviceInfo>,
 }
-
-pub fn set_fan_speed(
-    device_id: DeviceId,
-    channel: usize,
-    mode: ChannelMode,
-    speed: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Get All Devices
-    let api = match hidapi::HidApi::new() {
-        Ok(api) => api,
-        Err(_) => panic!("Could not find any controllers"),
-    };
-
-    let matching_devices: Vec<_> = api
-        .device_list()
-        .filter_map(|d| {
-            (VENDOR_IDS.contains(&d.vendor_id()) && PRODUCT_IDS.contains(&d.product_id())).then(
-                || {
-                    (
-                        format!(
-                            "VID:{}/PID:{}/SN:{}/PATH:{}",
-                            d.vendor_id().to_string(),
-                            d.product_id().to_string(),
-                            d.serial_number().unwrap_or("unknown").to_string(),
-                            d.path().to_str().unwrap_or("unknown").to_string()
-                        ),
-                        d,
-                    )
-                },
-            )
-        })
-        .collect();
-
-    for (device_id, hiddevice) in matching_devices {
-        {
-            let hid: HidDevice = match api.open_path(hiddevice.path()) {
-                Ok(hid) => hid,
-                Err(_) => {
-                    eprintln!("Please run uni-sync with elevated permissions.");
-                    std::process::exit(0);
-                }
-            };
-
-            let mut sync_rgb: bool = false;
-
-            // Send Command to Sync to RGB Header
-            let sync_byte: u8 = if sync_rgb { 1 } else { 0 };
-            let _ = match &hiddevice.product_id() {
-                0xa100 | 0x7750 => hid.write(&[224, 16, 48, sync_byte, 0, 0, 0]), // SL
-                0xa101 => hid.write(&[224, 16, 65, sync_byte, 0, 0, 0]),          // AL
-                0xa102 => hid.write(&[224, 16, 97, sync_byte, 0, 0, 0]),          // SLI
-                0xa103 | 0xa105 => hid.write(&[224, 16, 97, sync_byte, 0, 0, 0]), // SLv2
-                0xa104 => hid.write(&[224, 16, 97, sync_byte, 0, 0, 0]),          // ALv2
-                _ => hid.write(&[224, 16, 48, sync_byte, 0, 0, 0]),               // SL
-            };
-
-            // Avoid Race Condition
-            std::thread::sleep(time::Duration::from_millis(200));
-
-            // Disable Sync to fan header
-            let mut channel_byte = 0x10 << channel;
-            if mode == ChannelMode::PWM {
-                channel_byte = channel_byte | 0x1 << channel;
-            }
-
-            let _ = match &hiddevice.product_id() {
-                0xa100 | 0x7750 => hid.write(&[224, 16, 49, channel_byte]), // SL
-                0xa101 => hid.write(&[224, 16, 66, channel_byte]),          // AL
-                0xa102 => hid.write(&[224, 16, 98, channel_byte]),          // SLI
-                0xa103 | 0xa105 => hid.write(&[224, 16, 98, channel_byte]), // SLv2
-                0xa104 => hid.write(&[224, 16, 98, channel_byte]),          // ALv2
-                _ => hid.write(&[224, 16, 49, channel_byte]),               // SL
-            };
-
-            // Avoid Race Condition
-            std::thread::sleep(time::Duration::from_millis(200));
-
-            // Set Channel Speed
-            if mode == ChannelMode::Manual {
-                let mut speed = speed as f64;
-                if speed > 100.0 {
-                    speed = 100.0
-                }
-
-                let speed_800_1900: u8 =
-                    ((800.0 + (11.0 * speed)) as usize / 19).try_into().unwrap();
-                let speed_250_2000: u8 =
-                    ((250.0 + (17.5 * speed)) as usize / 20).try_into().unwrap();
-                let speed_200_2100: u8 =
-                    ((200.0 + (19.0 * speed)) as usize / 21).try_into().unwrap();
-
-                let _ = match &hiddevice.product_id() {
-                    0xa100 | 0x7750 => {
-                        hid.write(&[224, (channel + 32).try_into().unwrap(), 0, speed_800_1900])
-                    } // SL
-                    0xa101 => {
-                        hid.write(&[224, (channel + 32).try_into().unwrap(), 0, speed_800_1900])
-                    } // AL
-                    0xa102 => {
-                        hid.write(&[224, (channel + 32).try_into().unwrap(), 0, speed_200_2100])
-                    } // SLI
-                    0xa103 | 0xa105 => {
-                        hid.write(&[224, (channel + 32).try_into().unwrap(), 0, speed_250_2000])
-                    } // SLv2
-                    0xa104 => {
-                        hid.write(&[224, (channel + 32).try_into().unwrap(), 0, speed_250_2000])
-                    } // ALv2
-                    _ => hid.write(&[224, (channel + 32).try_into().unwrap(), 0, speed_800_1900]), // SL
-                };
-
-                // Avoid Race Condition
-                std::thread::sleep(time::Duration::from_millis(100));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-pub struct FanController;
 
 impl FanController {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let mut controller = Self {
-            device_configs: HashMap::new(),
-        };
+    pub fn new() -> Result<Self> {
+        let hidapi = hidapi::HidApi::new()?;
+        let device_configs = hidapi
+            .device_list()
+            .filter_map(|d| {
+                if VENDOR_IDS.contains(&d.vendor_id()) && PRODUCT_IDS.contains(&d.product_id()) {
+                    Some((
+                        DeviceId(
+                            d.vendor_id(),
+                            d.product_id(),
+                            d.serial_number()?.to_string(),
+                        ),
+                        d.clone(),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-        controller.discover_devices()?;
-        Ok(controller)
-    }
-
-    fn discover_devices(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let empty_configs = Configs { configs: vec![] };
-        let discovered_configs = run(empty_configs);
-
-        for config in discovered_configs.configs {
-            self.device_configs.insert(config.device_id.clone(), config);
-        }
-
-        Ok(())
+        Ok(Self {
+            hidapi,
+            device_configs,
+        })
     }
 
     pub fn set_fan_speed(
         &mut self,
-        device_id: &str,
+        device_id: &DeviceId,
         channel: usize,
+        mode: &ChannelMode,
         speed_percent: u8,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(config) = self.device_configs.get_mut(device_id) {
-            if channel < config.channels.len() {
-                config.channels[channel] = Channel {
-                    mode: "Manual".to_string(),
-                    speed: speed_percent as usize,
-                };
+    ) -> Result<()> {
+        let hiddevice = self
+            .device_configs
+            .get(device_id)
+            .ok_or_else(|| anyhow!("Device with given device id {} not available", device_id))?;
 
-                let single_config = Configs {
-                    configs: vec![config.clone()],
-                };
-
-                run(single_config);
-            } else {
-                return Err(
-                    format!("Channel {} not found for device {}", channel, device_id).into(),
-                );
+        let hid: HidDevice = match self.hidapi.open_path(hiddevice.path()) {
+            Ok(hid) => hid,
+            Err(_) => {
+                eprintln!("Please run uni-sync with elevated permissions.");
+                std::process::exit(0);
             }
-        } else {
-            return Err(format!("Device {} not found", device_id).into());
+        };
+
+        let sync_rgb: bool = false;
+
+        // Send Command to Sync to RGB Header
+        let sync_byte: u8 = if sync_rgb { 1 } else { 0 };
+        let _ = match &hiddevice.product_id() {
+            0xa100 | 0x7750 => hid.write(&[224, 16, 48, sync_byte, 0, 0, 0]), // SL
+            0xa101 => hid.write(&[224, 16, 65, sync_byte, 0, 0, 0]),          // AL
+            0xa102 => hid.write(&[224, 16, 97, sync_byte, 0, 0, 0]),          // SLI
+            0xa103 | 0xa105 => hid.write(&[224, 16, 97, sync_byte, 0, 0, 0]), // SLv2
+            0xa104 => hid.write(&[224, 16, 97, sync_byte, 0, 0, 0]),          // ALv2
+            _ => hid.write(&[224, 16, 48, sync_byte, 0, 0, 0]),               // SL
+        };
+
+        // Avoid Race Condition
+        std::thread::sleep(time::Duration::from_millis(200));
+
+        // Disable Sync to fan header
+        let mut channel_byte = 0x10 << channel;
+        if matches!(mode, ChannelMode::PWM) {
+            channel_byte = channel_byte | 0x1 << channel;
+        }
+
+        let _ = match &hiddevice.product_id() {
+            0xa100 | 0x7750 => hid.write(&[224, 16, 49, channel_byte]), // SL
+            0xa101 => hid.write(&[224, 16, 66, channel_byte]),          // AL
+            0xa102 => hid.write(&[224, 16, 98, channel_byte]),          // SLI
+            0xa103 | 0xa105 => hid.write(&[224, 16, 98, channel_byte]), // SLv2
+            0xa104 => hid.write(&[224, 16, 98, channel_byte]),          // ALv2
+            _ => hid.write(&[224, 16, 49, channel_byte]),               // SL
+        };
+
+        // Avoid Race Condition
+        std::thread::sleep(time::Duration::from_millis(200));
+
+        // Set Channel Speed
+        if matches!(mode, ChannelMode::Manual) {
+            let speed = (speed_percent as f64).clamp(0.0, 100.0);
+
+            let speed_800_1900: u8 = ((800.0 + (11.0 * speed)) as usize / 19).try_into().unwrap();
+            let speed_250_2000: u8 = ((250.0 + (17.5 * speed)) as usize / 20).try_into().unwrap();
+            let speed_200_2100: u8 = ((200.0 + (19.0 * speed)) as usize / 21).try_into().unwrap();
+
+            let _ = match &hiddevice.product_id() {
+                0xa100 | 0x7750 => {
+                    hid.write(&[224, (channel + 32).try_into().unwrap(), 0, speed_800_1900])
+                } // SL
+                0xa101 => hid.write(&[224, (channel + 32).try_into().unwrap(), 0, speed_800_1900]), // AL
+                0xa102 => hid.write(&[224, (channel + 32).try_into().unwrap(), 0, speed_200_2100]), // SLI
+                0xa103 | 0xa105 => {
+                    hid.write(&[224, (channel + 32).try_into().unwrap(), 0, speed_250_2000])
+                } // SLv2
+                0xa104 => hid.write(&[224, (channel + 32).try_into().unwrap(), 0, speed_250_2000]), // ALv2
+                _ => hid.write(&[224, (channel + 32).try_into().unwrap(), 0, speed_800_1900]), // SL
+            };
+
+            // Avoid Race Condition
+            std::thread::sleep(time::Duration::from_millis(100));
         }
 
         Ok(())
     }
 
-    pub fn get_available_devices(&self) -> Vec<String> {
+    pub fn get_available_devices(&self) -> Vec<DeviceId> {
         self.device_configs.keys().cloned().collect()
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     let args = Args::parse();
 
     let mut fan_controller = FanController::new()?;
     let available_devices = fan_controller.get_available_devices();
     if available_devices.is_empty() {
-        println!("No Lian Li devices found. Please ensure your devices are connected and you have the necessary permissions.");
-        return Ok(());
+        bail!("No Lian Li UNI devices found. Please ensure your devices are connected and you have the necessary permissions.");
     }
 
     if args.debug {
@@ -433,18 +383,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match get_max_cpu_temperature() {
             Some(cpu_temp) => {
+                if args.debug {
+                    println!("CPU temp: {:.1}°C", cpu_temp);
+                }
                 for fan_curve in &config.fan_curves {
                     let speed = calculate_fan_speed(fan_curve, cpu_temp);
                     if args.debug {
                         println!(
-                            "Device {} Channel {}: {:.1}°C -> {}%",
-                            fan_curve.device_id, fan_curve.channel, cpu_temp, speed
+                            "Setting device {} channel {} to {}%",
+                            fan_curve.device_id, fan_curve.channel, speed
                         );
                     }
 
-                    if let Err(e) =
-                        fan_controller.set_fan_speed(&fan_curve.device_id, fan_curve.channel, speed)
-                    {
+                    if let Err(e) = fan_controller.set_fan_speed(
+                        &fan_curve.device_id,
+                        fan_curve.channel,
+                        &fan_curve.mode,
+                        speed,
+                    ) {
                         eprintln!("Error applying fan speed: {}", e);
                     }
                 }
