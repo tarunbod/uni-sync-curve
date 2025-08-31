@@ -11,7 +11,10 @@ use tokio::time;
 #[command(name = "uni-sync-curve")]
 #[command(about = "A fan curve control daemon for Lian Li Uni fans")]
 pub struct Args {
-    #[arg(long = "config-file", help = "Path to configuration file (default: /etc/uni-sync-curve.json)")]
+    #[arg(
+        long = "config-file",
+        help = "Path to configuration file (default: /etc/uni-sync-curve.json)"
+    )]
     pub config_file: Option<String>,
 
     #[arg(long, help = "Enable debug logging")]
@@ -444,14 +447,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Available devices: {:?}", available_devices);
     }
 
-    let config_path = args.config_file
+    let config_path = args
+        .config_file
         .as_deref()
         .unwrap_or("/etc/uni-sync-curve.json");
 
     let config = load_config(Path::new(config_path), available_devices)?;
 
     println!("Using config file: {}", config_path);
-    println!("Loaded configuration with {} fan curves", config.fan_curves.len());
+    println!(
+        "Loaded configuration with {} fan curves",
+        config.fan_curves.len()
+    );
     println!("Update interval: {} seconds", config.interval_seconds);
 
     let mut interval = time::interval(Duration::from_secs(config.interval_seconds));
