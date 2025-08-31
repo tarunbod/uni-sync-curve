@@ -28,12 +28,12 @@ async fn main() -> Result<()> {
 
     let mut fan_controller = hardware::FanController::new()?;
     let available_devices = fan_controller.get_available_devices();
-    if available_devices.is_empty() {
-        bail!("No Lian Li UNI devices found. Please ensure your devices are connected and you have the necessary permissions.");
-    }
-
     if args.debug {
         println!("Available devices: {:?}", available_devices);
+    }
+
+    if available_devices.is_empty() {
+        bail!("No Lian Li UNI devices found. Please ensure your devices are connected and you have the necessary permissions.");
     }
 
     let config_path = args
