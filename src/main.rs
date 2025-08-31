@@ -1,3 +1,4 @@
+use clap::Parser;
 use hidapi::{self, HidDevice};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -5,6 +6,17 @@ use std::path::Path;
 use std::time::Duration;
 use sysinfo::Components;
 use tokio::time;
+
+#[derive(Parser, Debug)]
+#[command(name = "uni-sync-curve")]
+#[command(about = "A fan curve control daemon for Lian Li Uni fans")]
+pub struct Args {
+    #[arg(long = "config-file", help = "Path to configuration file (default: /etc/uni-sync-curve.json)")]
+    pub config_file: Option<String>,
+
+    #[arg(long, help = "Enable debug logging")]
+    pub debug: bool,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CurveConfig {
@@ -419,19 +431,27 @@ impl FanController {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
     let mut fan_controller = FanController::new()?;
     let available_devices = fan_controller.get_available_devices();
     if available_devices.is_empty() {
         println!("No Lian Li devices found. Please ensure your devices are connected and you have the necessary permissions.");
         return Ok(());
     }
-    println!("Available devices: {:?}", available_devices);
 
-    let config = load_config(Path::new("/etc/uni-sync-curve.json"), available_devices)?;
-    println!(
-        "Loaded configuration with {} fan curves",
-        config.fan_curves.len()
-    );
+    if args.debug {
+        println!("Available devices: {:?}", available_devices);
+    }
+
+    let config_path = args.config_file
+        .as_deref()
+        .unwrap_or("/etc/uni-sync-curve.json");
+
+    let config = load_config(Path::new(config_path), available_devices)?;
+
+    println!("Using config file: {}", config_path);
+    println!("Loaded configuration with {} fan curves", config.fan_curves.len());
     println!("Update interval: {} seconds", config.interval_seconds);
 
     let mut interval = time::interval(Duration::from_secs(config.interval_seconds));
@@ -442,10 +462,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(cpu_temp) => {
                 for fan_curve in &config.fan_curves {
                     let speed = calculate_fan_speed(fan_curve, cpu_temp);
-                    println!(
-                        "Device {} Channel {}: {:.1}°C -> {}%",
-                        fan_curve.device_id, fan_curve.channel, cpu_temp, speed
-                    );
+                    if args.debug {
+                        println!(
+                            "Device {} Channel {}: {:.1}°C -> {}%",
+                            fan_curve.device_id, fan_curve.channel, cpu_temp, speed
+                        );
+                    }
 
                     if let Err(e) =
                         fan_controller.set_fan_speed(&fan_curve.device_id, fan_curve.channel, speed)
