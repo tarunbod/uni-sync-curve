@@ -25,51 +25,50 @@ pub struct CurvePoint {
     pub fan_speed_percent: u8,
 }
 
-fn get_default_config(device_id: String) -> CurveConfig {
+fn get_default_config(device_ids: Vec<String>) -> CurveConfig {
     CurveConfig {
         interval_seconds: 10,
-        fan_curves: vec![FanCurve {
-            device_id,
-            channel: 0,
-            curve_points: vec![
-                CurvePoint {
-                    temperature_celsius: 30.0,
-                    fan_speed_percent: 20,
-                },
-                CurvePoint {
-                    temperature_celsius: 50.0,
-                    fan_speed_percent: 40,
-                },
-                CurvePoint {
-                    temperature_celsius: 70.0,
-                    fan_speed_percent: 70,
-                },
-                CurvePoint {
-                    temperature_celsius: 85.0,
-                    fan_speed_percent: 100,
-                },
-            ],
-        }],
+        fan_curves: device_ids
+            .into_iter()
+            .map(|device_id| FanCurve {
+                device_id,
+                channel: 0,
+                curve_points: vec![
+                    CurvePoint {
+                        temperature_celsius: 30.0,
+                        fan_speed_percent: 25,
+                    },
+                    CurvePoint {
+                        temperature_celsius: 50.0,
+                        fan_speed_percent: 50,
+                    },
+                    CurvePoint {
+                        temperature_celsius: 65.0,
+                        fan_speed_percent: 75,
+                    },
+                    CurvePoint {
+                        temperature_celsius: 80.0,
+                        fan_speed_percent: 100,
+                    },
+                ],
+            })
+            .collect(),
     }
 }
 
-const CONFIG_PATH: &str = "/etc/uni-sync-curve/uni-sync-curve.json";
-
-pub fn load_config(default_device_id: String) -> Result<CurveConfig, Box<dyn std::error::Error>> {
-    let config_path = Path::new(CONFIG_PATH);
+pub fn load_config(
+    config_path: &Path,
+    available_devices: Vec<String>,
+) -> Result<CurveConfig, Box<dyn std::error::Error>> {
     if !config_path.exists() {
-        println!(
-            "Creating default configuration with device ID: {} at: {:?}",
-            default_device_id, config_path
-        );
-
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        let default_config = get_default_config(default_device_id);
+        let default_config = get_default_config(available_devices);
         let config_json = serde_json::to_string_pretty(&default_config)?;
         std::fs::write(&config_path, config_json)?;
+        println!("Created default configuration at: {:?}", config_path);
         return Ok(default_config);
     }
 
@@ -428,7 +427,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("Available devices: {:?}", available_devices);
 
-    let config = load_config(available_devices[0].clone())?;
+    let config = load_config(Path::new("/etc/uni-sync-curve.json"), available_devices)?;
     println!(
         "Loaded configuration with {} fan curves",
         config.fan_curves.len()
@@ -441,7 +440,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match get_max_cpu_temperature() {
             Some(cpu_temp) => {
-                println!("CPU temp: {:.1}°C", cpu_temp);
                 for fan_curve in &config.fan_curves {
                     let speed = calculate_fan_speed(fan_curve, cpu_temp);
                     println!(
