@@ -63,37 +63,45 @@
             maintainers = [ "tarunbod" ];
           };
         };
+      }
+    )
+    // {
+      nixosModules.uni-sync-curve =
+        {
+          config,
+          pkgs,
+          lib,
+          ...
+        }:
+        {
+          options.services.uni-sync-curve = {
+            enable = lib.mkEnableOption "uni-sync-curve service";
 
-        nixosModules.default =
-          { config, pkgs, ... }:
-          {
-            options.services.uni-sync-curve = {
-              enable = pkgs.lib.mkEnableOption "uni-sync-curve service";
-
-              configFile = pkgs.lib.mkOption {
-                type = pkgs.lib.types.str;
-                default = "/etc/uni-sync-curve.json";
-                description = "Path to the uni-sync-curve configuration file";
-              };
+            configFile = lib.mkOption {
+              type = lib.types.str;
+              default = "/etc/uni-sync-curve.json";
+              description = "Path to the uni-sync-curve configuration file";
             };
+          };
 
-            config =
-              let
-                cfg = config.services.uni-sync-curve;
-              in
-              pkgs.lib.mkIf cfg.enable {
-                systemd.services.uni-sync-curve = {
-                  description = "uni-sync-curve service";
-                  after = [ "network.target" ];
-                  wantedBy = [ "multi-user.target" ];
-                  serviceConfig = {
-                    ExecStart = "${self.packages.${system}.default}/bin/uni-sync-curve --config-file ${cfg.configFile}";
-                    Restart = "on-failure";
-                    User = "root";
-                  };
+          config =
+            let
+              cfg = config.services.uni-sync-curve;
+              uni-sync-curve-pkg = self.packages.${pkgs.system}.default;
+            in
+            lib.mkIf cfg.enable {
+              systemd.services.uni-sync-curve = {
+                description = "uni-sync-curve service";
+                after = [ "network.target" ];
+                wantedBy = [ "multi-user.target" ];
+                serviceConfig = {
+                  ExecStart = "${uni-sync-curve-pkg}/bin/uni-sync-curve --config-file ${cfg.configFile}";
+                  Restart = "on-failure";
+                  User = "root";
                 };
               };
-          };
-      }
-    );
+            };
+        };
+      nixosModules.default = self.nixosModules.uni-sync-curve;
+    };
 }
