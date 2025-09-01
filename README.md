@@ -34,8 +34,18 @@ your flake:
     nixosConfigurations.your-machine = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       modules = [
-        ./configuration.nix
-        uni-sync-curve.nixosModule # TODO: something like that i gotta fix this
+        # ...
+
+        uni-sync-curve.nixosModules.default
+
+        {
+            services.uni-sync-curve = {
+              enable = true;
+              configFile = "/etc/uni-sync-curve/uni-sync-curve.json"; # Optional
+            };
+        }
+
+        # ...
       ];
       specialArgs = { inherit uni-sync-curve; };
     };

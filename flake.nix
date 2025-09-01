@@ -64,32 +64,36 @@
           };
         };
 
-        nixosModules.default = { config, pkgs, ... }: {
-          options.uni-sync-curve.enable = pkgs.lib.mkOption {
-            type = pkgs.lib.types.bool;
-            default = false;
-            description = "Enable uni-sync-curve service";
-          };
+        nixosModules.default =
+          { config, pkgs, ... }:
+          {
+            options.services.uni-sync-curve = {
+              enable = pkgs.lib.mkEnableOption "uni-sync-curve service";
 
-          options.uni-sync-curve.configFile = pkgs.lib.mkOption {
-            type = pkgs.lib.types.str;
-            default = "/etc/uni-sync-curve.json";
-            description = "Path to the uni-sync-curve configuration file";
-          };
-
-          config = pkgs.lib.mkIf config.uni-sync-curve.enable {
-            systemd.services."uni-sync-curve" = {
-              description = "uni-sync-curve service";
-              after = [ "network.target" ];
-              wantedBy = [ "multi-user.target" ];
-              serviceConfig = {
-                ExecStart = "${self.packages.${system}.default}/bin/uni-sync-curve --config-file ${config.uni-sync-curve.configFile}";
-                Restart = "on-failure";
-                User = "root";
+              configFile = pkgs.lib.mkOption {
+                type = pkgs.lib.types.str;
+                default = "/etc/uni-sync-curve.json";
+                description = "Path to the uni-sync-curve configuration file";
               };
             };
+
+            config =
+              let
+                cfg = config.services.uni-sync-curve;
+              in
+              pkgs.lib.mkIf cfg.enable {
+                systemd.services.uni-sync-curve = {
+                  description = "uni-sync-curve service";
+                  after = [ "network.target" ];
+                  wantedBy = [ "multi-user.target" ];
+                  serviceConfig = {
+                    ExecStart = "${self.packages.${system}.default}/bin/uni-sync-curve --config-file ${cfg.configFile}";
+                    Restart = "on-failure";
+                    User = "root";
+                  };
+                };
+              };
           };
-        };
       }
     );
 }
